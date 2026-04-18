@@ -42,11 +42,13 @@ jobs:
           BOOKING_PHONE:      ${{ secrets.BOOKING_PHONE }}
         run: python pizza4ps_book.py
 
-      - name: Upload screenshot
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pizza4ps-${{ github.run_id }}
-          path: booking_result.png
+          path: |
+            booking_result.png
+            screenshots/
           retention-days: 7
           if-no-files-found: ignore

@@ -4,42 +4,13 @@ const KEY = 'reservebot_v2';
 
 export const DEFAULT_AGENTS = [
   {
-    id: 'naru',
-    name: 'Naru Noodle Bar',
-    cuisine: 'Ramen · Shanti Nagar',
-    emoji: '🍜',
-    color: '#E8A74A',
-    bookingUrl: 'https://bookings.airmenus.in/eatnaru/order',
-    enabled: true,
-    schedule: {
-      type: 'weekly',        // 'weekly' | 'daily'
-      weekday: 1,            // 0=Sun … 6=Sat  (1=Mon)
-      hour: 20, minute: 0,
-      tz: 'Asia/Kolkata',
-      label: 'Every Monday at 8:00 PM IST',
-    },
-    prefs: {
-      partySize: 1,
-      slots: ['12:30 PM', '2:30 PM'],
-      days: ['Tue','Wed','Thu','Fri','Sat','Sun'],
-      specialRequest: '',
-    },
-    guest: {
-      name:  'Your Name',
-      phone: '0000000000',
-      email: 'you@example.com',
-    },
-    github: 'maxthecat2024/naru-booking',
-    history: [{ ts: new Date().toISOString(), status: 'success', note: 'Sample booking for testing' }],
-  },
-  {
     id: 'pizza4ps',
     name: "Pizza 4P's",
     cuisine: 'Italian · Indiranagar',
     emoji: '🍕',
     color: '#F87171',
     bookingUrl: 'https://www.tablecheck.com/en/pizza-4ps-in-indiranagar/reserve/message',
-    enabled: false,
+    enabled: true,
     schedule: {
       type: 'daily',
       weekday: null,
@@ -58,7 +29,7 @@ export const DEFAULT_AGENTS = [
       phone: '0000000000',
       email: 'you@example.com',
     },
-    github: '',
+    github: 'maxthecat2024/naru-booking',
     history: [],
   },
 ];

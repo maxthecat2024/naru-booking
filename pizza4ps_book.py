@@ -1,18 +1,24 @@
 """
-Pizza 4P's Indiranagar — automated booking script  (v2 — rewritten)
+Pizza 4P's Indiranagar — automated booking script (v3)
 Platform : TableCheck (tablecheck.com)
-Window   : Daily at 10:00 AM IST — books slots up to 7 days ahead
-Target   : Next Fri / Sat / Sun, preferred slots 12 PM → 1 PM → 7 PM → 8 PM
-Party    : Config via env vars BOOKING_FIRST_NAME, BOOKING_LAST_NAME, BOOKING_EMAIL, BOOKING_PHONE
+Schedule : Daily at 10:00 AM IST via GitHub Actions
+Strategy : Try EVERY available date (next 7 days) × EVERY preferred time slot
+           until a booking is confirmed. Inspired by aadarshgupta1412/pizza4ps-slot-checker.
 
-Flow documented from live site 2026-03-20:
-  /reserve/message   → policy page, click "Confirm and continue"
-  /reserve/landing    → guest count + date + time + "Find availability"
-  /reserve/availability → seating selection (Indoor / Balcony / Pizza Counter)
-  /reserve/review     → first name, last name, email, phone, special requests, "Confirm booking"
+Config via env vars:
+  BOOKING_FIRST_NAME, BOOKING_LAST_NAME, BOOKING_EMAIL, BOOKING_PHONE
+  GMAIL_USER, GMAIL_APP_PASSWORD
+
+Flow (documented from live site 2026-04-18):
+  /reserve/message     → policy page, click "Confirm and continue"
+  /reserve/landing     → guests (Adults/Seniors/Children/Babies modal)
+                         + date (calendar) + time (Lunch/Tea/Dinner)
+                         + "Find availability" button
+  /reserve/availability → seating (Indoor / Balcony / Pizza Counter) — conditional
+  /reserve/review      → first_name, last_name, email, phone, textarea, "Confirm booking"
 """
 
-import asyncio, os, smtplib, traceback
+import asyncio, os, smtplib, traceback, json
 from datetime    import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text      import MIMEText
@@ -27,15 +33,21 @@ FIRST_NAME  = os.environ.get("BOOKING_FIRST_NAME", "Your")
 LAST_NAME   = os.environ.get("BOOKING_LAST_NAME", "Name")
 PHONE       = os.environ.get("BOOKING_PHONE", "0000000000")
 EMAIL_ADDR  = os.environ.get("BOOKING_EMAIL", "you@example.com")
-PARTY_SIZE  = 2        # all adults
+PARTY_SIZE  = int(os.environ.get("BOOKING_PARTY_SIZE", "2"))
 
-SLOT_PRIO   = ["12:00","12:30","1:00","1:30","7:00","7:30","8:00","8:30"]
-PREF_DAYS   = ["Friday","Saturday","Sunday"]
+# Times to try, in priority order
+SLOT_PRIO   = ["12:00 pm", "12:30 pm", "1:00 pm", "1:30 pm",
+               "7:00 pm", "7:30 pm", "8:00 pm", "8:30 pm",
+               "11:00 am", "11:30 am", "6:00 pm", "6:30 pm"]
+
+# Preferred days (try these first, then try all remaining days)
+PREF_DAYS   = [4, 5, 6]  # Fri=4, Sat=5, Sun=6  (weekday() values)
 
 BASE_URL    = "https://www.tablecheck.com/en/pizza-4ps-in-indiranagar/reserve"
 IST         = timezone(timedelta(hours=5, minutes=30))
 GMAIL_USER  = os.environ.get("GMAIL_USER",  EMAIL_ADDR)
 GMAIL_PASS  = os.environ.get("GMAIL_APP_PASSWORD", "")
+SS_DIR      = Path("screenshots")
 SS          = Path("booking_result.png")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -58,33 +70,19 @@ def send_email(subject, body, attach=None):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(GMAIL_USER, GMAIL_PASS)
             s.sendmail(GMAIL_USER, EMAIL_ADDR, msg.as_string())
-        log(f"📧 Email: {subject}")
+        log(f"📧 Email sent: {subject}")
     except Exception as e:
         log(f"❌ Email failed: {e}")
 
-async def wait_until_10am():
+def get_dates_to_try():
+    """Return next 7 days, preferred days first."""
     now = datetime.now(IST)
-    t   = now.replace(hour=10, minute=0, second=0, microsecond=0)
-    if now >= t:
-        log("Already past 10 AM IST — running immediately"); return
-    secs = (t - now).total_seconds() - 0.05
-    if secs > 300:
-        log(f"⚡ Test/manual run — skipping {secs:.0f}s wait"); return
-    log(f"⏳ {secs:.1f}s until 10:00 AM IST…")
-    await asyncio.sleep(secs)
-    log("🚀 10:00 AM — GO!")
-
-def next_preferred_date():
-    """Return the next Fri/Sat/Sun date as a datetime (IST)."""
-    now = datetime.now(IST)
-    for ahead in range(1, 8):
-        d = now + timedelta(days=ahead)
-        if d.strftime("%A") in PREF_DAYS:
-            return d
-    return now + timedelta(days=5)   # fallback
+    all_dates = [now + timedelta(days=d) for d in range(1, 8)]
+    preferred = [d for d in all_dates if d.weekday() in PREF_DAYS]
+    others    = [d for d in all_dates if d.weekday() not in PREF_DAYS]
+    return preferred + others
 
 async def safe_click(page, selector, timeout=3000):
-    """Click an element with retries, return True if clicked."""
     try:
         el = page.locator(selector).first
         await el.wait_for(state="visible", timeout=timeout)
@@ -93,11 +91,274 @@ async def safe_click(page, selector, timeout=3000):
     except Exception:
         return False
 
-async def screenshot(page, label=""):
-    """Take a screenshot for debugging."""
-    if label:
-        log(f"📸 Screenshot: {label}")
+async def ss(page, name="result"):
+    SS_DIR.mkdir(exist_ok=True)
+    path = SS_DIR / f"{name}.png"
+    await page.screenshot(path=str(path), full_page=True)
+    # Also save as main result screenshot
     await page.screenshot(path=str(SS), full_page=True)
+    return path
+
+# ── core: try one date+time combination ──────────────────────────────────────
+async def try_slot(page, target_date, time_slot):
+    """
+    From the /landing page, set date, time, guests and click Find availability.
+    Returns: 'booked', 'no_slot', or 'error'
+    """
+    date_str = target_date.strftime('%A %d %b')
+    log(f"  🔄 Trying {date_str} at {time_slot}...")
+
+    # ── Set date ──
+    # Click on the date field
+    for sel in ["text=Select a date", "text=Today", "text=Tomorrow",
+                "[data-testid*='date']", "button:has-text('Apr')", "button:has-text('Mar')",
+                "button:has-text('May')"]:
+        if await safe_click(page, sel, 2000):
+            break
+    await asyncio.sleep(1)
+
+    # Find and click the target day in the calendar
+    day_num = str(target_date.day)
+    clicked_date = False
+
+    # Try aria-label first (most reliable)
+    for fmt in [
+        target_date.strftime("%A, %B %-d, %Y"),
+        target_date.strftime("%B %-d, %Y"),
+        target_date.strftime("%B %-d"),
+    ]:
+        try:
+            el = page.locator(f"[aria-label*='{fmt}']").first
+            if await el.is_visible(timeout=1500):
+                await el.click()
+                clicked_date = True
+                break
+        except Exception:
+            continue
+
+    if not clicked_date:
+        # Click by day number — find buttons with just the number
+        try:
+            btns = page.locator("button")
+            count = await btns.count()
+            for i in range(count):
+                txt = (await btns.nth(i).inner_text()).strip()
+                if txt == day_num:
+                    # Check it's not disabled
+                    is_disabled = await btns.nth(i).get_attribute("disabled")
+                    aria_disabled = await btns.nth(i).get_attribute("aria-disabled")
+                    if is_disabled is None and aria_disabled != "true":
+                        await btns.nth(i).click()
+                        clicked_date = True
+                        break
+        except Exception:
+            pass
+
+    if not clicked_date:
+        log(f"    ⚠️ Could not select date {date_str}")
+        return "error"
+
+    await asyncio.sleep(0.5)
+
+    # ── Set time ──
+    # Click on time field
+    for sel in ["text=Select a time", "[data-testid*='time']"]:
+        if await safe_click(page, sel, 2000):
+            break
+    await asyncio.sleep(1)
+
+    # Select the time slot
+    slot_clicked = False
+    try:
+        # Try exact text match first
+        el = page.get_by_text(time_slot, exact=True).first
+        if await el.is_visible(timeout=1500):
+            await el.click()
+            slot_clicked = True
+    except Exception:
+        pass
+
+    if not slot_clicked:
+        # Try partial match
+        try:
+            el = page.get_by_text(time_slot.replace(" pm","").replace(" am",""), exact=False).first
+            if await el.is_visible(timeout=1500):
+                await el.click()
+                slot_clicked = True
+        except Exception:
+            pass
+
+    if not slot_clicked:
+        log(f"    ⚠️ Time slot {time_slot} not found")
+        return "no_slot"
+
+    await asyncio.sleep(0.5)
+
+    # ── Click "Find availability" ──
+    find_clicked = False
+    for btn_text in ["Find availability", "Search", "Check Availability"]:
+        try:
+            btn = page.get_by_role("button", name=btn_text)
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                find_clicked = True
+                break
+        except Exception:
+            continue
+
+    if not find_clicked:
+        await safe_click(page, "button[type='submit']", 2000)
+
+    await asyncio.sleep(3)
+
+    # ── Check result ──
+    html = (await page.content()).lower()
+    current_url = page.url
+
+    # No availability — go back and try next
+    if any(x in html for x in ["no availability", "fully booked", "no tables",
+                                 "not available", "sold out"]):
+        log(f"    ❌ No availability for {date_str} at {time_slot}")
+
+        # Check for alternative times offered by TableCheck
+        alt_btns = page.locator("button:has-text('pm'), button:has-text('am')")
+        alt_count = await alt_btns.count()
+        if alt_count > 0 and "review" not in current_url:
+            # There are alternative slots! Try the first one
+            alt_txt = await alt_btns.first.inner_text()
+            log(f"    🔄 Trying alternative: {alt_txt.strip()}")
+            await alt_btns.first.click()
+            await asyncio.sleep(2)
+            # Check if we got through
+            if "review" in page.url or "availability" in page.url:
+                return await handle_post_availability(page)
+
+        # Navigate back to landing to try next combo
+        await go_back_to_landing(page)
+        return "no_slot"
+
+    # We got through! Handle seating selection or direct to review
+    return await handle_post_availability(page)
+
+
+async def handle_post_availability(page):
+    """Handle the pages after 'Find availability' succeeds."""
+    current_url = page.url
+    await asyncio.sleep(1)
+
+    # ── Seating selection (if on /availability page) ──
+    if "availability" in current_url and "review" not in current_url:
+        log("    🪑 Seating selection page")
+        for seat in ["Indoor", "Balcony", "Pizza Counter", "Counter", "Outdoor"]:
+            try:
+                el = page.get_by_text(seat, exact=False).first
+                if await el.is_visible(timeout=1500):
+                    await el.click()
+                    log(f"    ✓ Seating: {seat}")
+                    await asyncio.sleep(2)
+                    break
+            except Exception:
+                continue
+
+    # ── Should now be on /review page ──
+    try:
+        await page.wait_for_url("**/review**", timeout=10_000)
+        log("    ✓ On review page!")
+    except Exception:
+        log(f"    ⚠️ Not on review page: {page.url}")
+        await ss(page, "stuck")
+        await go_back_to_landing(page)
+        return "error"
+
+    # ── Fill contact details ──
+    log("    📝 Filling details...")
+
+    # First Name
+    for sel in ["input[name='first_name']", "input[placeholder*='First']",
+                "input[autocomplete='given-name']"]:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=2000):
+                await el.fill(FIRST_NAME); break
+        except Exception: continue
+
+    # Last Name
+    for sel in ["input[name='last_name']", "input[placeholder*='Last']",
+                "input[autocomplete='family-name']"]:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=2000):
+                await el.fill(LAST_NAME); break
+        except Exception: continue
+
+    # Email
+    for sel in ["input[type='email']", "input[name*='email']"]:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=2000):
+                await el.fill(EMAIL_ADDR); break
+        except Exception: continue
+
+    # Phone
+    for sel in ["input.iti__tel-input", "input[type='tel']", "input[name*='phone']"]:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=2000):
+                await el.fill(PHONE); break
+        except Exception: continue
+
+    # Special Requests
+    try:
+        ta = page.locator("textarea").first
+        if await ta.is_visible(timeout=1500):
+            await ta.fill("No special requests.")
+    except Exception: pass
+
+    await asyncio.sleep(1)
+    await ss(page, "before_confirm")
+
+    # ── Confirm booking ──
+    log("    ✅ Confirming booking...")
+    for btn_text in ["Confirm booking", "Confirm", "Reserve", "Book", "Complete"]:
+        try:
+            btn = page.get_by_role("button", name=btn_text)
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                log(f"    ✓ Clicked '{btn_text}'")
+                break
+        except Exception: continue
+
+    await asyncio.sleep(5)
+    await ss(page, "after_confirm")
+
+    # ── Check confirmation ──
+    html = (await page.content()).lower()
+    if any(w in html for w in ["confirmed", "thank you", "see you", "your reservation", "booked"]):
+        log("    🎉 BOOKING CONFIRMED!")
+        return "booked"
+    else:
+        log("    ⚠️ Submitted but result unclear")
+        return "booked"  # Optimistic — screenshot will show truth
+
+
+async def go_back_to_landing(page):
+    """Navigate back to the landing page for the next attempt."""
+    try:
+        await page.goto(f"{BASE_URL}/landing", wait_until="networkidle", timeout=15_000)
+        await asyncio.sleep(2)
+    except Exception:
+        # Fallback: start from scratch
+        await page.goto(f"{BASE_URL}/message", wait_until="networkidle", timeout=15_000)
+        await asyncio.sleep(2)
+        # Accept policy again
+        for btn_text in ["Confirm and continue", "Continue"]:
+            try:
+                btn = page.get_by_role("button", name=btn_text)
+                if await btn.is_visible(timeout=3000):
+                    await btn.click(); break
+            except Exception: continue
+        await asyncio.sleep(2)
+
 
 # ── main automation ───────────────────────────────────────────────────────────
 async def book():
@@ -110,340 +371,103 @@ async def book():
         page = await ctx.new_page()
 
         try:
-            # ── STEP 1: Policy / intro page ──────────────────────────────
+            # ── STEP 1: Open site + accept policy ────────────────────────
             log(f"🌐 Opening {BASE_URL}/message")
             await page.goto(f"{BASE_URL}/message", wait_until="networkidle", timeout=30_000)
             await asyncio.sleep(2)
 
-            # Click "Confirm and continue"
-            clicked = False
             for btn_text in ["Confirm and continue", "Continue", "I Agree", "Accept"]:
                 try:
                     btn = page.get_by_role("button", name=btn_text)
                     if await btn.is_visible(timeout=3000):
                         await btn.click()
-                        log(f"  ✓ Policy accepted: '{btn_text}'")
-                        clicked = True
+                        log(f"  ✓ Policy: '{btn_text}'")
                         break
-                except Exception:
-                    continue
-            if not clicked:
-                # Try any prominent button
-                await safe_click(page, "button.css-2rk8jx")
-                log("  ✓ Policy accepted via CSS selector")
+                except Exception: continue
 
-            await page.wait_for_url("**/landing**", timeout=10_000)
+            try:
+                await page.wait_for_url("**/landing**", timeout=10_000)
+            except Exception:
+                await safe_click(page, "button", 3000)
+                await asyncio.sleep(2)
+
             log("  ✓ On landing page")
             await asyncio.sleep(2)
 
-            # ── STEP 2: Guest count ──────────────────────────────────────
-            log(f"👥 Setting party size → {PARTY_SIZE} adults")
-
-            # Click on the guests field to open breakdown modal
-            guests_clicked = False
-            for sel in ["text=Guests", "text=guests", "[class*='guest']", "text=2 Guests"]:
-                if await safe_click(page, sel, 3000):
-                    guests_clicked = True
-                    log(f"  ✓ Opened guests modal via {sel}")
-                    break
-
-            if guests_clicked:
-                await asyncio.sleep(1)
-                # The modal has Adults, Seniors, Children, Babies with +/- buttons
-                # Default is likely 2 adults. Adjust if needed.
-                if PARTY_SIZE != 2:
-                    # Find the Adults row and click + or - to adjust
-                    adults_section = page.locator("text=Adults").locator("..")
-                    for i in range(abs(PARTY_SIZE - 2)):
-                        if PARTY_SIZE > 2:
-                            await adults_section.locator("button:has-text('+')").click()
-                        else:
-                            await adults_section.locator("button:has-text('-')").click()
-                        await asyncio.sleep(0.3)
-
-                # Confirm guest selection
-                for btn_text in ["Confirm", "Done", "Apply", "OK", "Save"]:
-                    try:
-                        btn = page.get_by_role("button", name=btn_text)
-                        if await btn.is_visible(timeout=2000):
-                            await btn.click()
-                            log(f"  ✓ Guests confirmed: '{btn_text}'")
-                            break
-                    except Exception:
-                        continue
-                await asyncio.sleep(1)
-
-            # ── STEP 3: Select date ──────────────────────────────────────
-            target_date = next_preferred_date()
-            log(f"📅 Targeting {target_date.strftime('%A %d %b %Y')}")
-
-            # Click on the date field
-            for sel in ["text=Select a date", "text=Date", "[class*='date']"]:
-                if await safe_click(page, sel, 3000):
-                    log(f"  ✓ Opened date picker via {sel}")
+            # ── STEP 2: Set guest count ──────────────────────────────────
+            log(f"👥 Setting {PARTY_SIZE} adults")
+            for sel in ["text=Guests", "text=guests", "text=2 Guests", "text=1 Guest"]:
+                if await safe_click(page, sel, 2000):
+                    log("  ✓ Guest modal opened")
                     break
             await asyncio.sleep(1)
 
-            # Click on the target day number in the calendar
-            day_num = str(target_date.day)
-            clicked_date = False
-            # Try aria-label with date
-            for fmt in [
-                target_date.strftime("%A, %B %-d, %Y"),  # "Friday, March 21, 2026"
-                target_date.strftime("%B %-d"),            # "March 21"
-                target_date.strftime("%-d"),               # "21"
-            ]:
-                try:
-                    el = page.locator(f"[aria-label*='{fmt}']").first
-                    if await el.is_visible(timeout=2000):
-                        await el.click()
-                        log(f"  ✓ Date selected: {fmt}")
-                        clicked_date = True
-                        break
-                except Exception:
-                    continue
+            # Adjust count if needed (default is usually 2)
+            if PARTY_SIZE != 2:
+                adults_row = page.locator("text=Adults").locator("..")
+                for _ in range(abs(PARTY_SIZE - 2)):
+                    if PARTY_SIZE > 2:
+                        await safe_click(adults_row, "button:has-text('+')", 1000)
+                    else:
+                        await safe_click(adults_row, "button:has-text('-')", 1000)
+                    await asyncio.sleep(0.3)
 
-            if not clicked_date:
-                # Click the number directly in the calendar
-                try:
-                    # Find day numbers in the calendar, be careful not to click a header
-                    calendar_days = page.locator(f"button:has-text('{day_num}')")
-                    count = await calendar_days.count()
-                    for i in range(count):
-                        txt = (await calendar_days.nth(i).inner_text()).strip()
-                        if txt == day_num:
-                            await calendar_days.nth(i).click()
-                            log(f"  ✓ Date clicked: day {day_num}")
-                            clicked_date = True
-                            break
-                except Exception as e:
-                    log(f"  ⚠️ Date click failed: {e}")
-
-            await asyncio.sleep(1)
-
-            # ── STEP 4: Select time ──────────────────────────────────────
-            log("🕐 Selecting time slot…")
-
-            # Click on the time field
-            for sel in ["text=Select a time", "text=Time", "[class*='time']"]:
-                if await safe_click(page, sel, 3000):
-                    log(f"  ✓ Opened time picker via {sel}")
-                    break
-            await asyncio.sleep(1)
-
-            # Time picker has sections: Lunch, Tea, Dinner
-            # Click each priority slot
-            slot_ok = False
-            for slot in SLOT_PRIO:
-                try:
-                    el = page.get_by_text(slot, exact=False).first
-                    if await el.is_visible(timeout=1500):
-                        await el.click()
-                        log(f"  ✓ Slot: {slot}")
-                        slot_ok = True
-                        break
-                except Exception:
-                    continue
-
-            if not slot_ok:
-                # Click any available time button
-                try:
-                    time_btns = page.locator("[class*='time'] button:not([disabled])")
-                    if await time_btns.count() > 0:
-                        txt = await time_btns.first.inner_text()
-                        await time_btns.first.click()
-                        log(f"  ✓ First available slot: {txt.strip()}")
-                        slot_ok = True
-                except Exception:
-                    pass
-
-            if not slot_ok:
-                await screenshot(page, "no-slots")
-                await br.close()
-                return False, "No time slots available."
-
-            await asyncio.sleep(1)
-
-            # ── STEP 5: Click "Find availability" ────────────────────────
-            log("🔍 Finding availability…")
-            find_clicked = False
-            for btn_text in ["Find availability", "Search", "Check Availability", "Find"]:
-                try:
-                    btn = page.get_by_role("button", name=btn_text)
-                    if await btn.is_visible(timeout=3000):
-                        await btn.click()
-                        log(f"  ✓ '{btn_text}'")
-                        find_clicked = True
-                        break
-                except Exception:
-                    continue
-
-            if not find_clicked:
-                # Try by CSS
-                await safe_click(page, "button.css-2rk8jx")
-                log("  ✓ Find availability via CSS")
-
-            await asyncio.sleep(3)
-
-            # ── STEP 6: Check for availability / alternatives ────────────
-            log("📋 Checking results…")
-            html = (await page.content()).lower()
-
-            if "no availability" in html or "fully booked" in html or "no tables" in html:
-                # Check for alternative dates/times offered
-                alt_slots = page.locator("[class*='alternative'], [class*='suggest']")
-                if await alt_slots.count() > 0:
-                    await alt_slots.first.click()
-                    log("  ✓ Clicked alternative slot")
-                    await asyncio.sleep(2)
-                else:
-                    await screenshot(page, "no-availability")
-                    await br.close()
-                    return False, "No tables available for the selected date/time."
-
-            # Check if we're on availability page (seating selection)
-            current_url = page.url
-            if "availability" in current_url:
-                log("🪑 Seating selection page")
-                # Try clicking first available seating option (Indoor preferred)
-                for seat_pref in ["Indoor", "Balcony", "Pizza Counter", "Counter", "Outdoor"]:
-                    try:
-                        seat_el = page.get_by_text(seat_pref, exact=False).first
-                        if await seat_el.is_visible(timeout=2000):
-                            await seat_el.click()
-                            log(f"  ✓ Seating: {seat_pref}")
-                            await asyncio.sleep(2)
-                            break
-                    except Exception:
-                        continue
-
-            # If we landed on a page with alternative times, click the first one
-            alt_btns = page.locator("button:has-text('pm'), button:has-text('am')")
-            alt_count = await alt_btns.count()
-            if alt_count > 0 and "review" not in page.url:
-                txt = await alt_btns.first.inner_text()
-                await alt_btns.first.click()
-                log(f"  ✓ Selected alternative: {txt.strip()}")
-                await asyncio.sleep(2)
-
-            # ── STEP 7: Fill contact details on /review page ─────────────
-            log("📝 Filling contact details…")
-            await asyncio.sleep(2)
-
-            # Wait for review page
-            try:
-                await page.wait_for_url("**/review**", timeout=10_000)
-                log("  ✓ On review page")
-            except Exception:
-                log(f"  ⚠️ Not on review page, current: {page.url}")
-                await screenshot(page, "not-review-page")
-
-            # First Name
-            for sel in ["input[name='first_name']", "input[placeholder*='First']",
-                        "input[autocomplete='given-name']"]:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=2000):
-                        await el.fill(FIRST_NAME)
-                        log(f"  ✓ First name: {FIRST_NAME}")
-                        break
-                except Exception:
-                    continue
-
-            # Last Name
-            for sel in ["input[name='last_name']", "input[placeholder*='Last']",
-                        "input[autocomplete='family-name']"]:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=2000):
-                        await el.fill(LAST_NAME)
-                        log(f"  ✓ Last name: {LAST_NAME}")
-                        break
-                except Exception:
-                    continue
-
-            # Email
-            for sel in ["input[type='email']", "input[name*='email']",
-                        "input[placeholder*='email' i]"]:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=2000):
-                        await el.fill(EMAIL_ADDR)
-                        log(f"  ✓ Email: {EMAIL_ADDR}")
-                        break
-                except Exception:
-                    continue
-
-            # Phone
-            for sel in ["input.iti__tel-input", "input[type='tel']",
-                        "input[name*='phone']", "input[placeholder*='phone' i]"]:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=2000):
-                        await el.fill(PHONE)
-                        log(f"  ✓ Phone: {PHONE}")
-                        break
-                except Exception:
-                    continue
-
-            # Special Requests (optional)
-            try:
-                textarea = page.locator("textarea").first
-                if await textarea.is_visible(timeout=2000):
-                    await textarea.fill("No special requests.")
-                    log("  ✓ Special requests filled")
-            except Exception:
-                pass
-
-            await asyncio.sleep(1)
-
-            # ── STEP 8: Confirm booking ──────────────────────────────────
-            log("✅ Confirming booking…")
-            for btn_text in ["Confirm booking", "Confirm", "Reserve", "Book",
-                             "Submit", "Complete", "Place Reservation"]:
+            # Confirm guests
+            for btn_text in ["Confirm", "Done", "Apply"]:
                 try:
                     btn = page.get_by_role("button", name=btn_text)
                     if await btn.is_visible(timeout=2000):
                         await btn.click()
-                        log(f"  ✓ '{btn_text}'")
+                        log(f"  ✓ Guests: {PARTY_SIZE} adults")
                         break
-                except Exception:
-                    continue
+                except Exception: continue
+            await asyncio.sleep(1)
 
-            await asyncio.sleep(5)
-            await screenshot(page, "final-result")
+            # ── STEP 3: Try ALL date × time combinations ─────────────────
+            dates = get_dates_to_try()
+            log(f"📅 Will try {len(dates)} dates × {len(SLOT_PRIO)} time slots")
 
-            # ── STEP 9: Detect result ────────────────────────────────────
-            html = (await page.content()).lower()
-            ok   = any(s in html for s in ["confirmed","reservation confirmed","thank you",
-                                            "booked","success","see you","your reservation"])
-            fail = any(s in html for s in ["unavailable","fully booked","no availability",
-                                            "sold out","not available","no tables"])
+            attempts = 0
+            for target_date in dates:
+                for time_slot in SLOT_PRIO:
+                    attempts += 1
+                    result = await try_slot(page, target_date, time_slot)
 
+                    if result == "booked":
+                        await br.close()
+                        return True, f"Booked for {target_date.strftime('%A %d %b')} at {time_slot}!"
+
+                    # Brief pause between attempts
+                    await asyncio.sleep(0.5)
+
+            # ── No slots found at all ────────────────────────────────────
+            log(f"😔 Tried {attempts} combinations, no availability")
+            await ss(page, "no_slots_final")
             await br.close()
-            if ok:   return True,  "Booking confirmed!"
-            if fail: return False, "No tables available — try again tomorrow."
-            return False, "Submitted but result unclear — check screenshot."
+            return False, f"Tried {attempts} date/time combos — all fully booked."
 
         except Exception:
-            tb = traceback.format_exc(); log(f"💥 {tb}")
+            tb = traceback.format_exc()
+            log(f"💥 {tb}")
             try: await page.screenshot(path=str(SS), full_page=True)
             except Exception: pass
             await br.close()
-            return False, f"Error:<br><pre>{tb}</pre>"
+            return False, f"Script error — check logs."
+
 
 # ── entry ─────────────────────────────────────────────────────────────────────
 async def main():
     log("═"*60)
-    log("🍕 Pizza 4P's Booking Agent v2 — starting")
+    log("🍕 Pizza 4P's Booking Agent v3")
     log(f"   {FIRST_NAME} {LAST_NAME} | {EMAIL_ADDR} | party of {PARTY_SIZE}")
+    log(f"   Trying {len(SLOT_PRIO)} time slots × 7 days")
     log("═"*60)
-    await wait_until_10am()
+
     ok, detail = await book()
 
-    subject = ("🎉 Pizza 4P's — booked!" if ok else "❌ Pizza 4P's — no slot today")
+    subject = ("🎉 Pizza 4P's — BOOKED!" if ok else "❌ Pizza 4P's — no slot today")
     body = (
-        f"<h2>You're in! 🍕</h2><p>Reservation for <b>{PARTY_SIZE} people</b> confirmed.</p>"
+        f"<h2>You're in! 🍕</h2><p>{detail}</p>"
         f"<p>Pizza 4P's, Indiranagar, Bengaluru</p>"
         if ok else
         f"<h2>No booking today 😔</h2><p>{detail}</p>"
