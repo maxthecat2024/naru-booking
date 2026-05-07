@@ -630,32 +630,42 @@ async def book():
             final_url = page.url
             log(f"  Final URL: {final_url}")
 
-            # Only count as success if we actually reached the review/confirm pages
+            # Success indicators
+            on_reservation = "/reservation/" in final_url  # e.g., /reservation/6CV93L
             on_review = "review" in final_url
             on_confirm = "confirm" in final_url or "complete" in final_url
 
-            ok = (on_review or on_confirm) and any(w in html for w in [
-                "reservation confirmed", "thank you", "see you",
-                "your reservation has been", "booking confirmed",
-                "we look forward"
+            success_text = any(w in html for w in [
+                "successfully booked", "reservation confirmed",
+                "thank you for your reservation",
+                "we've successfully", "your reservation",
+                "reservation id", "add to calendar"
             ])
-            fail = any(w in html for w in [
+
+            fail_text = any(w in html for w in [
                 "fully booked", "no availability",
                 "sold out", "not available"
             ])
 
+            # Extract reservation ID from URL if present
+            res_id = ""
+            if on_reservation:
+                res_id = final_url.split("/reservation/")[-1].split("?")[0]
+                log(f"  📋 Reservation ID: {res_id}")
+
             await br.close()
 
-            if ok:
-                log("🎉 BOOKING CONFIRMED!")
-                return True, "Booking confirmed!"
+            if on_reservation or success_text:
+                detail = f"Reservation ID: {res_id}" if res_id else "Booking confirmed"
+                log(f"🎉 BOOKING CONFIRMED! {detail}")
+                return True, detail
             elif confirmed and on_review:
                 log("⚠️ Submitted from review page — check screenshot")
                 return True, "Submitted from review page (check screenshot)"
-            elif fail:
+            elif fail_text:
                 log("😔 Booking failed")
                 return False, "Booking failed — check screenshot."
-            elif not on_review and not on_confirm:
+            elif not on_review and not on_confirm and not on_reservation:
                 log("❌ Never reached the review page")
                 return False, f"Stuck at {final_url} — never reached review."
             else:
@@ -685,8 +695,12 @@ async def main():
     subject = ("🎉 Pizza 4P's — BOOKED!" if ok
                else "❌ Pizza 4P's — no slot today")
     body = (
-        f"<h2>You're in! 🍕</h2><p>{detail}</p>"
-        f"<p>Pizza 4P's, Indiranagar, Bengaluru</p>"
+        f"<h2>You're in! 🍕</h2>"
+        f"<p><b>{detail}</b></p>"
+        f"<p>🏢 Pizza 4P's, Indiranagar, Bengaluru</p>"
+        f"<p>👥 {PARTY_SIZE} Guests</p>"
+        f"<p>View your reservation: "
+        f"<a href='https://www.tablecheck.com/en/reservation/'>TableCheck</a></p>"
         if ok else
         f"<h2>No booking today 😔</h2><p>{detail}</p>"
         f"<p>Trying again tomorrow at <b>10:00 AM IST</b>.</p>"
