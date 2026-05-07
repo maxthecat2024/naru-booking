@@ -374,7 +374,11 @@ async def book():
                     pass
 
             # ── 6. HANDLE AVAILABILITY PAGE ──────────────────────────────
-            # CASE A: Seating cards visible (slot available!)
+            # NOTE: In headless mode, the page often shows seating cards as
+            # empty skeleton buttons that never render text content.
+            # The 9 empty buttons ARE the seating options (3 sections x 3 times).
+
+            # CASE A: Try to find seating text (works in non-headless)
             seating_found = False
             for seat in ["Indoor", "Balcony", "Pizza Counter"]:
                 try:
@@ -387,6 +391,34 @@ async def book():
                         break
                 except Exception:
                     continue
+
+            # CASE A2: If buttons are empty (skeleton), click the FIRST one
+            # These ARE the seating cards, just not rendered with text
+            if not seating_found:
+                empty_btns = []
+                all_btns = page.locator("button")
+                total = await all_btns.count()
+                for bi in range(total):
+                    try:
+                        txt = (await all_btns.nth(bi).inner_text()).strip()
+                        if txt == "":
+                            empty_btns.append(bi)
+                    except Exception:
+                        pass
+
+                if len(empty_btns) >= 3:
+                    # Multiple empty buttons = likely seating skeleton cards
+                    log(f"  🪑 Clicking first empty button (skeleton seating card)")
+                    try:
+                        await all_btns.nth(empty_btns[0]).click()
+                        await asyncio.sleep(3)
+                        await snap(page, "04_after_skeleton_click")
+                        log(f"  URL after click: {page.url}")
+                        if "review" in page.url:
+                            seating_found = True
+                            log("  ✓ Reached review page via skeleton card!")
+                    except Exception as e:
+                        log(f"  ⚠️ Skeleton click failed: {e}")
 
             # CASE B: No availability — alternative times shown
             if not seating_found:
