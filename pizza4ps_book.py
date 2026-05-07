@@ -36,11 +36,24 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 # ── config ────────────────────────────────────────────────────────────────────
-FIRST_NAME  = os.environ.get("BOOKING_FIRST_NAME", "Your")
-LAST_NAME   = os.environ.get("BOOKING_LAST_NAME", "Name")
-PHONE       = os.environ.get("BOOKING_PHONE", "0000000000")
-EMAIL_ADDR  = os.environ.get("BOOKING_EMAIL", "you@example.com")
-PARTY_SIZE  = int(os.environ.get("BOOKING_PARTY_SIZE", "2"))
+# The workflow maps the dynamic inputs to INPUT_* and the secrets to SECRET_*.
+# We prioritize the dynamic inputs, falling back to the secrets if left blank.
+
+_in_name  = os.environ.get("INPUT_GUEST_NAME", "").strip()
+_sec_name = f'{os.environ.get("SECRET_FIRST_NAME", "")} {os.environ.get("SECRET_LAST_NAME", "")}'.strip()
+FULL_NAME = _in_name if _in_name else _sec_name
+
+_name_parts = FULL_NAME.split(" ", 1)
+FIRST_NAME  = _name_parts[0] if len(_name_parts) > 0 else "Your"
+LAST_NAME   = _name_parts[1] if len(_name_parts) > 1 else "Name"
+
+PHONE       = os.environ.get("INPUT_GUEST_PHONE") or os.environ.get("SECRET_PHONE") or "0000000000"
+EMAIL_ADDR  = os.environ.get("INPUT_GUEST_EMAIL") or os.environ.get("SECRET_EMAIL") or "you@example.com"
+
+try:
+    PARTY_SIZE = int(os.environ.get("INPUT_PARTY_SIZE") or "2")
+except ValueError:
+    PARTY_SIZE = 2
 
 BASE_URL    = "https://www.tablecheck.com/en/pizza-4ps-in-indiranagar/reserve"
 IST         = timezone(timedelta(hours=5, minutes=30))

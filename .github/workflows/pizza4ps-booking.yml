@@ -8,6 +8,22 @@ on:
         description: 'Target booking date (YYYY-MM-DD), e.g. 2026-05-15'
         required: false
         default: ''
+      guest_name:
+        description: 'Guest Full Name'
+        required: false
+        default: ''
+      guest_email:
+        description: 'Guest Email'
+        required: false
+        default: ''
+      guest_phone:
+        description: 'Guest Phone'
+        required: false
+        default: ''
+      party_size:
+        description: 'Party Size'
+        required: false
+        default: ''
 
 jobs:
   book:
@@ -38,10 +54,14 @@ jobs:
         env:
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          BOOKING_FIRST_NAME: ${{ secrets.BOOKING_FIRST_NAME }}
-          BOOKING_LAST_NAME:  ${{ secrets.BOOKING_LAST_NAME }}
-          BOOKING_EMAIL:      ${{ secrets.BOOKING_EMAIL }}
-          BOOKING_PHONE:      ${{ secrets.BOOKING_PHONE }}
+          SECRET_FIRST_NAME:  ${{ secrets.BOOKING_FIRST_NAME }}
+          SECRET_LAST_NAME:   ${{ secrets.BOOKING_LAST_NAME }}
+          SECRET_EMAIL:       ${{ secrets.BOOKING_EMAIL }}
+          SECRET_PHONE:       ${{ secrets.BOOKING_PHONE }}
+          INPUT_GUEST_NAME:   ${{ github.event.inputs.guest_name }}
+          INPUT_GUEST_EMAIL:  ${{ github.event.inputs.guest_email }}
+          INPUT_GUEST_PHONE:  ${{ github.event.inputs.guest_phone }}
+          INPUT_PARTY_SIZE:   ${{ github.event.inputs.party_size }}
           TARGET_DATE:        ${{ github.event.inputs.target_date }}
         run: xvfb-run --auto-servernum python pizza4ps_book.py
 

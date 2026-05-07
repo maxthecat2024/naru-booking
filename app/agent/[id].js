@@ -51,7 +51,13 @@ export default function AgentDetail() {
           },
           body: JSON.stringify({ 
             ref: 'main',
-            inputs: agent.targetDate ? { target_date: agent.targetDate } : {}
+            inputs: {
+              ...(agent.targetDate ? { target_date: agent.targetDate } : {}),
+              guest_name: agent.guest?.name || '',
+              guest_email: agent.guest?.email || '',
+              guest_phone: agent.guest?.phone || '',
+              party_size: String(agent.prefs?.partySize || '2'),
+            }
           }),
         }
       );
