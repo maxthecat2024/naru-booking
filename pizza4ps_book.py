@@ -322,28 +322,56 @@ async def book():
                 except Exception:
                     continue
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
 
             # Wait for the availability page to FULLY load
-            # (it shows loading skeletons initially)
+            # The page shows loading skeleton cards initially, then fills
+            # in with seating options (Indoor/Balcony/Pizza Counter) or
+            # alternative dates. This can take 5-15 seconds.
             log("  ⏳ Waiting for availability page to load...")
-            for wait_i in range(10):
+
+            # Strategy: wait until buttons have actual text content
+            for wait_i in range(20):
+                # Check if any button has real text (not empty)
+                btns = page.locator("button")
+                count = await btns.count()
+                has_text = False
+                for bi in range(count):
+                    try:
+                        txt = (await btns.nth(bi).inner_text()).strip()
+                        if len(txt) > 1 and txt not in ["<", ">"]:
+                            has_text = True
+                            break
+                    except Exception:
+                        pass
+
                 html = (await page.content()).lower()
-                # Check if content has loaded (no more skeleton/loading state)
-                if any(x in html for x in ["indoor", "balcony", "pizza counter",
-                                            "no availability", "alternative",
-                                            "other dates"]):
+                if has_text or any(x in html for x in
+                    ["indoor", "balcony", "pizza counter",
+                     "no availability", "other dates with availability"]):
                     log(f"  ✓ Content loaded after {wait_i + 1}s")
                     break
                 await asyncio.sleep(1)
             else:
-                log("  ⚠️ Page may not have fully loaded")
+                log("  ⚠️ Page may not have fully loaded after 20s")
 
             await snap(page, "03_availability")
             log(f"  URL: {page.url}")
 
-            # Re-read HTML after waiting
+            # Final wait + re-read
+            await asyncio.sleep(2)
             html = (await page.content()).lower()
+
+            # Debug: log all button texts
+            btns = page.locator("button")
+            count = await btns.count()
+            log(f"  Buttons after load ({count}):")
+            for bi in range(min(count, 15)):
+                try:
+                    txt = (await btns.nth(bi).inner_text()).strip()
+                    log(f"    [{bi}]: '{txt}'")
+                except Exception:
+                    pass
 
             # ── 6. HANDLE AVAILABILITY PAGE ──────────────────────────────
             # CASE A: Seating cards visible (slot available!)
@@ -547,16 +575,21 @@ async def book():
 
             # ── 9. CHECK RESULT ──────────────────────────────────────────
             html = (await page.content()).lower()
-            log(f"  Final URL: {page.url}")
+            final_url = page.url
+            log(f"  Final URL: {final_url}")
 
-            ok = any(w in html for w in [
-                "confirmed", "thank you", "see you",
-                "your reservation", "booked", "success",
-                "reservation confirmed"
+            # Only count as success if we actually reached the review/confirm pages
+            on_review = "review" in final_url
+            on_confirm = "confirm" in final_url or "complete" in final_url
+
+            ok = (on_review or on_confirm) and any(w in html for w in [
+                "reservation confirmed", "thank you", "see you",
+                "your reservation has been", "booking confirmed",
+                "we look forward"
             ])
             fail = any(w in html for w in [
-                "unavailable", "fully booked", "no availability",
-                "sold out", "not available", "error"
+                "fully booked", "no availability",
+                "sold out", "not available"
             ])
 
             await br.close()
@@ -564,12 +597,15 @@ async def book():
             if ok:
                 log("🎉 BOOKING CONFIRMED!")
                 return True, "Booking confirmed!"
+            elif confirmed and on_review:
+                log("⚠️ Submitted from review page — check screenshot")
+                return True, "Submitted from review page (check screenshot)"
             elif fail:
                 log("😔 Booking failed")
                 return False, "Booking failed — check screenshot."
-            elif confirmed:
-                log("⚠️ Submitted — check screenshot for confirmation")
-                return True, "Submitted (check screenshot)"
+            elif not on_review and not on_confirm:
+                log("❌ Never reached the review page")
+                return False, f"Stuck at {final_url} — never reached review."
             else:
                 log("❌ Could not complete booking flow")
                 return False, "Could not complete booking — check screenshots."
