@@ -97,9 +97,18 @@ def next_preferred_date():
 # ══════════════════════════════════════════════════════════════════════════════
 async def book():
     async with async_playwright() as pw:
+        # Use non-headless mode + xvfb on CI to avoid bot detection.
+        # TableCheck blocks headless Chrome — the SPA never finishes
+        # rendering in headless mode.
+        is_ci = os.environ.get("CI") == "true"
         br  = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            headless=False,  # Always non-headless (xvfb on CI)
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+            ]
         )
         ctx = await br.new_context(
             viewport={"width": 1440, "height": 900},
@@ -109,6 +118,10 @@ async def book():
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
         )
+        # Remove navigator.webdriver flag (stealth)
+        await ctx.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        """)
         page = await ctx.new_page()
 
         try:
@@ -322,13 +335,20 @@ async def book():
                 except Exception:
                     continue
 
+            # Wait for navigation to /availability (SPA navigation)
+            log("  ⏳ Waiting for navigation to availability page...")
+            try:
+                await page.wait_for_url("**/availability**", timeout=25_000)
+                log(f"  ✓ Navigated to {page.url}")
+            except Exception:
+                log(f"  ⚠️ URL still: {page.url}")
+                # Take diagnostic screenshot
+                await snap(page, "03_stuck_at_landing")
+
             await asyncio.sleep(3)
 
             # Wait for the availability page to FULLY load
-            # The page shows loading skeleton cards initially, then fills
-            # in with seating options (Indoor/Balcony/Pizza Counter) or
-            # alternative dates. This can take 5-15 seconds.
-            log("  ⏳ Waiting for availability page to load...")
+            log("  ⏳ Waiting for content to render...")
 
             # Strategy: wait until buttons have actual text content
             for wait_i in range(20):

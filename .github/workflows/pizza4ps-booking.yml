@@ -40,7 +40,7 @@ jobs:
           BOOKING_LAST_NAME:  ${{ secrets.BOOKING_LAST_NAME }}
           BOOKING_EMAIL:      ${{ secrets.BOOKING_EMAIL }}
           BOOKING_PHONE:      ${{ secrets.BOOKING_PHONE }}
-        run: python pizza4ps_book.py
+        run: xvfb-run --auto-servernum python pizza4ps_book.py
 
       - name: Upload screenshots
         if: always()
