@@ -3,6 +3,11 @@ name: Pizza 4Ps Booking Agent
 on:
   # Manual trigger only (from app or GitHub UI)
   workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Target booking date (YYYY-MM-DD), e.g. 2026-05-15'
+        required: false
+        default: ''
 
 jobs:
   book:
@@ -37,6 +42,7 @@ jobs:
           BOOKING_LAST_NAME:  ${{ secrets.BOOKING_LAST_NAME }}
           BOOKING_EMAIL:      ${{ secrets.BOOKING_EMAIL }}
           BOOKING_PHONE:      ${{ secrets.BOOKING_PHONE }}
+          TARGET_DATE:        ${{ github.event.inputs.target_date }}
         run: xvfb-run --auto-servernum python pizza4ps_book.py
 
       - name: Upload screenshots

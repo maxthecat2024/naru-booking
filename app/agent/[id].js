@@ -49,7 +49,10 @@ export default function AgentDetail() {
             Accept: 'application/vnd.github+json',
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ ref: 'main' }),
+          body: JSON.stringify({ 
+            ref: 'main',
+            inputs: agent.targetDate ? { target_date: agent.targetDate } : {}
+          }),
         }
       );
       if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
@@ -312,6 +315,19 @@ export default function AgentDetail() {
         <FieldRow label="Email"       value={agent.guest.email}
           onChange={v=>set('guest.email',v)} placeholder="you@email.com"
           keyboardType="email-address" last />
+      </Card>
+
+      {/* ─────────── SPECIFIC DATE (NEW) ─────────── */}
+      <SectionTitle title="Target Date" />
+      <Card>
+        <FieldRow label="Exact Date (YYYY-MM-DD) (Optional)"
+          value={agent.targetDate || ''}
+          onChange={v=>set('targetDate', v)}
+          placeholder="e.g. 2026-05-15"
+          last />
+        <Text style={{ fontSize:11, color:C.t3, marginTop:S.sm, lineHeight:16 }}>
+          If set, "Run Now" will target this specific date and try for up to 15 minutes to secure a slot as soon as bookings open.
+        </Text>
       </Card>
 
       {/* ─────────── BOOKING PREFS ─────────── */}

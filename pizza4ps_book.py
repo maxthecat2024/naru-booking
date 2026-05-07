@@ -244,8 +244,18 @@ async def book():
             await asyncio.sleep(1)
 
             # ── 3. SELECT DATE ───────────────────────────────────────────
-            target = next_preferred_date()
-            log(f"📅 Targeting {target.strftime('%A %b %d')}")
+            target = None
+            target_date_env = os.environ.get("TARGET_DATE")
+            if target_date_env:
+                try:
+                    target = datetime.strptime(target_date_env, "%Y-%m-%d").replace(tzinfo=IST)
+                    log(f"📅 Targeting specific date: {target.strftime('%A %b %d')}")
+                except Exception as e:
+                    log(f"⚠️ Invalid TARGET_DATE format '{target_date_env}', falling back. Error: {e}")
+            
+            if not target:
+                target = next_preferred_date()
+                log(f"📅 Targeting {target.strftime('%A %b %d')}")
 
             # Open date picker
             for sel in ["text=Select a date", "text=Today", "text=Tomorrow"]:
@@ -323,7 +333,22 @@ async def book():
                     pass
             await asyncio.sleep(1)
 
-            # ── 5. FIND AVAILABILITY ─────────────────────────────────────
+            # ── 5. FIND AVAILABILITY & RETRY LOOP ────────────────────────
+            import time
+            start_time = time.time()
+            max_duration = 15 * 60  # 15 minutes
+            
+            loop_i = 0
+            while time.time() - start_time < max_duration:
+                loop_i += 1
+                if loop_i > 1:
+                    log(f"🔄 Retry #{loop_i} ({(time.time() - start_time)/60:.1f}m elapsed)")
+                    # Re-click the time to make the Find availability button active again
+                    try:
+                        await page.get_by_text("12:00", exact=False).first.click()
+                    except:
+                        pass
+                    await asyncio.sleep(1)
             log("🔍 Finding availability...")
             for txt in ["Find availability", "Search"]:
                 try:
@@ -338,12 +363,10 @@ async def book():
             # Wait for navigation to /availability (SPA navigation)
             log("  ⏳ Waiting for navigation to availability page...")
             try:
-                await page.wait_for_url("**/availability**", timeout=25_000)
+                await page.wait_for_url("**/availability**", timeout=15_000)
                 log(f"  ✓ Navigated to {page.url}")
             except Exception:
                 log(f"  ⚠️ URL still: {page.url}")
-                # Take diagnostic screenshot
-                await snap(page, "03_stuck_at_landing")
 
             await asyncio.sleep(3)
 
@@ -375,23 +398,9 @@ async def book():
             else:
                 log("  ⚠️ Page may not have fully loaded after 20s")
 
-            await snap(page, "03_availability")
-            log(f"  URL: {page.url}")
-
             # Final wait + re-read
             await asyncio.sleep(2)
             html = (await page.content()).lower()
-
-            # Debug: log all button texts
-            btns = page.locator("button")
-            count = await btns.count()
-            log(f"  Buttons after load ({count}):")
-            for bi in range(min(count, 15)):
-                try:
-                    txt = (await btns.nth(bi).inner_text()).strip()
-                    log(f"    [{bi}]: '{txt}'")
-                except Exception:
-                    pass
 
             # ── 6. HANDLE AVAILABILITY PAGE ──────────────────────────────
             # NOTE: In headless mode, the page often shows seating cards as
@@ -443,23 +452,15 @@ async def book():
             # CASE B: No availability — alternative times shown
             if not seating_found:
                 log("  ⚠️ No direct availability — checking alternatives")
-                await snap(page, "03b_checking_alts")
 
-                # The alternative section shows dates like "Thu May 14"
-                # with time buttons like "12:00 pm", "12:15 pm" etc.
-                # Try multiple selectors for the time buttons
                 alt_btns = None
                 alt_count = 0
 
                 for selector in [
-                    "button:has-text('pm')",
-                    "button:has-text('am')",
-                    "button:has-text('PM')",
-                    "button:has-text('AM')",
-                    "button:has-text(':00')",
-                    "button:has-text(':15')",
-                    "button:has-text(':30')",
-                    "button:has-text(':45')",
+                    "button:has-text('pm')", "button:has-text('am')",
+                    "button:has-text('PM')", "button:has-text('AM')",
+                    "button:has-text(':00')", "button:has-text(':15')",
+                    "button:has-text(':30')", "button:has-text(':45')",
                 ]:
                     try:
                         btns = page.locator(selector)
@@ -467,55 +468,62 @@ async def book():
                         if c > 0:
                             alt_btns = btns
                             alt_count = c
-                            log(f"  Found {c} buttons via '{selector}'")
+                            log(f"  Found {c} alternative buttons via '{selector}'")
                             break
                     except Exception:
                         continue
 
-                if alt_count == 0:
-                    # Last resort: dump all button texts for debugging
-                    all_btns = page.locator("button")
-                    total = await all_btns.count()
-                    log(f"  All buttons on page ({total}):")
-                    for bi in range(min(total, 15)):
-                        try:
-                            t = await all_btns.nth(bi).inner_text()
-                            log(f"    [{bi}]: '{t.strip()}'")
-                        except Exception:
-                            pass
-
                 if alt_count > 0:
-                    # Click the FIRST alternative time
-                    alt_text = await alt_btns.first.inner_text()
-                    await alt_btns.first.click()
-                    log(f"  ✓ Selected alternative: {alt_text.strip()}")
-                    await asyncio.sleep(3)
-                    await snap(page, "04_after_alt_click")
-                else:
-                    # Also check for "Show dates after" button
-                    try:
-                        show_more = page.get_by_text("Show dates after", exact=False)
-                        if await show_more.is_visible(timeout=2000):
-                            await show_more.click()
-                            log("  ✓ Clicked 'Show dates after'")
-                            await asyncio.sleep(3)
-                            # Try again
-                            alt_btns = page.locator("button:has-text('pm'), button:has-text('am')")
-                            if await alt_btns.count() > 0:
-                                t = await alt_btns.first.inner_text()
-                                await alt_btns.first.click()
-                                log(f"  ✓ Alternative after expand: {t.strip()}")
-                                await asyncio.sleep(3)
-                            else:
-                                log("  ❌ No alternatives even after expanding")
-                                await snap(page, "no_alternatives")
-                                await br.close()
-                                return False, "No alternatives available."
-                    except Exception:
-                        log("  ❌ No alternatives available")
-                        await snap(page, "no_alternatives")
+                    # Check if any alternative is within acceptable window (10:00 AM - 2:30 PM)
+                    acceptable_times = [
+                        "10:00", "10:15", "10:30", "10:45",
+                        "11:00", "11:15", "11:30", "11:45",
+                        "12:00", "12:15", "12:30", "12:45",
+                        "1:00", "1:15", "1:30", "1:45",
+                        "2:00", "2:15", "2:30"
+                    ]
+                    
+                    selected_alt = None
+                    for i in range(alt_count):
+                        try:
+                            txt = await alt_btns.nth(i).inner_text()
+                            t_clean = txt.strip().lower()
+                            if any(a in t_clean for a in acceptable_times):
+                                selected_alt = alt_btns.nth(i)
+                                log(f"  ✓ Found acceptable alternative: {txt.strip()}")
+                                break
+                        except:
+                            pass
+                    
+                    if selected_alt:
+                        await selected_alt.click()
+                        await asyncio.sleep(3)
+                        seating_found = True
+                        break  # Break out of the 15-min retry loop
+                    else:
+                        log("  ❌ Alternatives available, but outside acceptable window.")
+                        # Don't loop if there are only bad alternatives
                         await br.close()
-                        return False, "No availability and no alternative times."
+                        return False, "Alternatives available, but outside preferred window."
+
+                else:
+                    # No alternatives found, trigger retry loop
+                    log("  ❌ No availability and no alternatives.")
+                    if time.time() - start_time < max_duration:
+                        log("  ⏳ Waiting 30s before next retry...")
+                        await asyncio.sleep(30)
+                        # Go back to landing page to reset state
+                        await page.goto("https://www.tablecheck.com/en/pizza-4ps-in-indiranagar/reserve/landing", wait_until="networkidle")
+                        await asyncio.sleep(3)
+                        continue
+                    else:
+                        log("  🛑 15-minute retry window expired.")
+                        await br.close()
+                        return False, "15-minute retry window expired. No slots opened."
+            
+            # If we get here, we found seating and broke out of the loop
+            if seating_found:
+                break
 
             # ── 7. FILL REVIEW FORM ──────────────────────────────────────
             # Should now be on /review page
