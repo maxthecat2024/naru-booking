@@ -1,10 +1,7 @@
 name: Pizza 4Ps Booking Agent
 
 on:
-  # Daily at 04:30 UTC = 10:00 AM IST
-  schedule:
-    - cron: '30 4 * * *'
-  # Manual trigger for testing
+  # Manual trigger only (from app or GitHub UI)
   workflow_dispatch:
 
 jobs:
