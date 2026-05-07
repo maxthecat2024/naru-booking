@@ -121,25 +121,62 @@ async def book():
             await asyncio.sleep(3)
             await snap(page, "01_message_page")
 
-            # Click "Confirm and continue"
+            # Click "Confirm and continue" — button is at bottom of long page
+            # Must scroll to it first!
+            policy_clicked = False
             for txt in ["Confirm and continue", "Continue", "I Agree"]:
                 try:
                     btn = page.get_by_role("button", name=txt)
-                    if await btn.is_visible(timeout=3000):
-                        await btn.click()
-                        log(f"  ✓ '{txt}'")
-                        break
+                    # Scroll the button into view even if it's off-screen
+                    await btn.scroll_into_view_if_needed(timeout=5000)
+                    await asyncio.sleep(0.5)
+                    await btn.click()
+                    log(f"  ✓ '{txt}'")
+                    policy_clicked = True
+                    break
                 except Exception:
                     continue
 
+            if not policy_clicked:
+                # Fallback: scroll to bottom and try again
+                log("  ⚠️ Scrolling to bottom to find button...")
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(1)
+                try:
+                    btn = page.get_by_role("button", name="Confirm and continue")
+                    await btn.click(force=True)
+                    log("  ✓ 'Confirm and continue' (after scroll)")
+                    policy_clicked = True
+                except Exception as e:
+                    log(f"  ❌ Could not click policy button: {e}")
+
             # Wait for landing page
             try:
-                await page.wait_for_url("**/landing**", timeout=10_000)
+                await page.wait_for_url("**/landing**", timeout=15_000)
             except Exception:
-                pass
-            await asyncio.sleep(2)
-            log(f"  ✓ On {page.url}")
+                # Maybe the URL didn't change but the page content did
+                await asyncio.sleep(3)
+
+            current = page.url
+            log(f"  Current URL: {current}")
             await snap(page, "02_landing_page")
+
+            if "landing" not in current:
+                log("  ❌ FAILED to reach landing page!")
+                log("  Attempting direct navigation to landing...")
+                await page.goto(
+                    f"{BASE_URL}/landing",
+                    wait_until="networkidle", timeout=15_000
+                )
+                await asyncio.sleep(3)
+                current = page.url
+                log(f"  After direct nav: {current}")
+                await snap(page, "02b_direct_landing")
+
+                if "landing" not in current:
+                    log("  ❌ Still not on landing — aborting")
+                    await br.close()
+                    return False, "Could not get past policy page"
 
             # ── 2. GUEST COUNT ───────────────────────────────────────────
             log(f"👥 Setting {PARTY_SIZE} guests")
