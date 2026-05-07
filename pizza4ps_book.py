@@ -322,13 +322,30 @@ async def book():
                 except Exception:
                     continue
 
-            await asyncio.sleep(4)
+            await asyncio.sleep(5)
+
+            # Wait for the availability page to FULLY load
+            # (it shows loading skeletons initially)
+            log("  ⏳ Waiting for availability page to load...")
+            for wait_i in range(10):
+                html = (await page.content()).lower()
+                # Check if content has loaded (no more skeleton/loading state)
+                if any(x in html for x in ["indoor", "balcony", "pizza counter",
+                                            "no availability", "alternative",
+                                            "other dates"]):
+                    log(f"  ✓ Content loaded after {wait_i + 1}s")
+                    break
+                await asyncio.sleep(1)
+            else:
+                log("  ⚠️ Page may not have fully loaded")
+
             await snap(page, "03_availability")
             log(f"  URL: {page.url}")
 
-            # ── 6. HANDLE AVAILABILITY PAGE ──────────────────────────────
+            # Re-read HTML after waiting
             html = (await page.content()).lower()
 
+            # ── 6. HANDLE AVAILABILITY PAGE ──────────────────────────────
             # CASE A: Seating cards visible (slot available!)
             seating_found = False
             for seat in ["Indoor", "Balcony", "Pizza Counter"]:
@@ -344,15 +361,48 @@ async def book():
                     continue
 
             # CASE B: No availability — alternative times shown
-            if not seating_found and "no availability" in html:
-                log("  ⚠️ No availability — checking alternatives")
+            if not seating_found:
+                log("  ⚠️ No direct availability — checking alternatives")
+                await snap(page, "03b_checking_alts")
 
-                # Find all alternative time buttons
-                alt_btns = page.locator(
-                    "button:has-text('am'), button:has-text('pm')"
-                )
-                alt_count = await alt_btns.count()
-                log(f"  Found {alt_count} alternative time buttons")
+                # The alternative section shows dates like "Thu May 14"
+                # with time buttons like "12:00 pm", "12:15 pm" etc.
+                # Try multiple selectors for the time buttons
+                alt_btns = None
+                alt_count = 0
+
+                for selector in [
+                    "button:has-text('pm')",
+                    "button:has-text('am')",
+                    "button:has-text('PM')",
+                    "button:has-text('AM')",
+                    "button:has-text(':00')",
+                    "button:has-text(':15')",
+                    "button:has-text(':30')",
+                    "button:has-text(':45')",
+                ]:
+                    try:
+                        btns = page.locator(selector)
+                        c = await btns.count()
+                        if c > 0:
+                            alt_btns = btns
+                            alt_count = c
+                            log(f"  Found {c} buttons via '{selector}'")
+                            break
+                    except Exception:
+                        continue
+
+                if alt_count == 0:
+                    # Last resort: dump all button texts for debugging
+                    all_btns = page.locator("button")
+                    total = await all_btns.count()
+                    log(f"  All buttons on page ({total}):")
+                    for bi in range(min(total, 15)):
+                        try:
+                            t = await all_btns.nth(bi).inner_text()
+                            log(f"    [{bi}]: '{t.strip()}'")
+                        except Exception:
+                            pass
 
                 if alt_count > 0:
                     # Click the FIRST alternative time
@@ -362,11 +412,30 @@ async def book():
                     await asyncio.sleep(3)
                     await snap(page, "04_after_alt_click")
                 else:
-                    # No alternatives either
-                    log("  ❌ No alternatives available")
-                    await snap(page, "no_alternatives")
-                    await br.close()
-                    return False, "No availability and no alternative times offered."
+                    # Also check for "Show dates after" button
+                    try:
+                        show_more = page.get_by_text("Show dates after", exact=False)
+                        if await show_more.is_visible(timeout=2000):
+                            await show_more.click()
+                            log("  ✓ Clicked 'Show dates after'")
+                            await asyncio.sleep(3)
+                            # Try again
+                            alt_btns = page.locator("button:has-text('pm'), button:has-text('am')")
+                            if await alt_btns.count() > 0:
+                                t = await alt_btns.first.inner_text()
+                                await alt_btns.first.click()
+                                log(f"  ✓ Alternative after expand: {t.strip()}")
+                                await asyncio.sleep(3)
+                            else:
+                                log("  ❌ No alternatives even after expanding")
+                                await snap(page, "no_alternatives")
+                                await br.close()
+                                return False, "No alternatives available."
+                    except Exception:
+                        log("  ❌ No alternatives available")
+                        await snap(page, "no_alternatives")
+                        await br.close()
+                        return False, "No availability and no alternative times."
 
             # ── 7. FILL REVIEW FORM ──────────────────────────────────────
             # Should now be on /review page
