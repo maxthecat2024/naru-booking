@@ -121,31 +121,44 @@ async def book():
             await asyncio.sleep(3)
             await snap(page, "01_message_page")
 
-            # Click "Confirm and continue" — button is at bottom of long page
-            # Must scroll to it first!
+            # Click "Confirm and continue" — button at bottom of long policy page
+            # NOTE: Page has TWO matching elements (a div + a button).
+            # The actual button has data-testid="Footer Button"
             policy_clicked = False
-            for txt in ["Confirm and continue", "Continue", "I Agree"]:
+
+            # Method 1: Use the unique test ID (most reliable)
+            try:
+                btn = page.get_by_test_id("Footer Button")
+                await btn.scroll_into_view_if_needed(timeout=5000)
+                await asyncio.sleep(0.5)
+                await btn.click()
+                log("  ✓ 'Confirm and continue' (via test ID)")
+                policy_clicked = True
+            except Exception as e:
+                log(f"  ⚠️ Test ID click failed: {e}")
+
+            # Method 2: Target the <button> element specifically
+            if not policy_clicked:
                 try:
-                    btn = page.get_by_role("button", name=txt)
-                    # Scroll the button into view even if it's off-screen
+                    btn = page.locator("button:has-text('Confirm and continue')")
                     await btn.scroll_into_view_if_needed(timeout=5000)
                     await asyncio.sleep(0.5)
                     await btn.click()
-                    log(f"  ✓ '{txt}'")
+                    log("  ✓ 'Confirm and continue' (via button selector)")
                     policy_clicked = True
-                    break
                 except Exception:
-                    continue
+                    pass
 
+            # Method 3: Scroll + JS click
             if not policy_clicked:
-                # Fallback: scroll to bottom and try again
-                log("  ⚠️ Scrolling to bottom to find button...")
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(1)
+                log("  ⚠️ Fallback: JS click...")
                 try:
-                    btn = page.get_by_role("button", name="Confirm and continue")
-                    await btn.click(force=True)
-                    log("  ✓ 'Confirm and continue' (after scroll)")
+                    await page.evaluate("""
+                        const btn = document.querySelector('button[data-testid="Footer Button"]')
+                            || document.querySelector('button[data-variant]');
+                        if (btn) btn.click();
+                    """)
+                    log("  ✓ 'Confirm and continue' (via JS)")
                     policy_clicked = True
                 except Exception as e:
                     log(f"  ❌ Could not click policy button: {e}")
